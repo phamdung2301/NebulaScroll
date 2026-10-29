@@ -1,0 +1,28 @@
+const { chromium } = require('playwright-core');
+const fs = require('fs');
+const path = require('path');
+const OUT = path.join(__dirname, 'shots');
+const CHROME = '/home/hatch/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome';
+const BASE = 'http://127.0.0.1:4175/';
+(async () => {
+  const browser = await chromium.launch({ executablePath: CHROME, args: ['--no-sandbox', '--disable-gpu'] });
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  await page.goto(BASE, { waitUntil: 'networkidle' });
+  await page.waitForTimeout(1500);
+  await page.getByRole('button', { name: 'Bắt đầu bay' }).click();
+  await page.waitForTimeout(1000);
+  const dist0 = await page.locator('.arrow-dist').textContent();
+  await page.keyboard.down('KeyW');
+  await page.waitForTimeout(6000);
+  await page.keyboard.up('KeyW');
+  await page.waitForTimeout(500);
+  const dist1 = await page.locator('.arrow-dist').textContent();
+  const scanVisible = await page.getByRole('button', { name: /Quét Ngôi sao non/ }).isVisible().catch(() => false);
+  console.log('distance before W:', dist0, '| after W:', dist1, '| scan button visible:', scanVisible);
+  await page.keyboard.press('KeyE');
+  await page.waitForTimeout(900);
+  const panelVisible = await page.locator('.overlay-card h2').textContent().catch(() => 'NO PANEL');
+  console.log('panel heading after E:', panelVisible);
+  fs.writeFileSync(path.join(OUT, 'playthrough.png'), await page.screenshot());
+  await browser.close();
+})().catch((e) => { console.error(e); process.exit(1); });

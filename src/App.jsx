@@ -1,85 +1,142 @@
-import { useMemo, useRef, useState } from 'react'
-import { useMotionValueEvent, useScroll } from 'framer-motion'
-import NebulaScene from './components/NebulaScene.jsx'
-import StoryOverlay, { scrollToProgress } from './components/StoryOverlay.jsx'
-import ErrorBoundary from './components/ErrorBoundary.jsx'
-import { TOTAL_VH, chapterIndexFor } from './data/story.js'
+import { Suspense, lazy, useEffect, useMemo, useRef } from 'react'
+import { Canvas } from '@react-three/fiber'
+import { createFlight } from './game/flight'
 
-const PORTFOLIO_URL = 'https://portfolio-one-rust-99.vercel.app/'
+// Lazy-load the 3D scene so the intro overlay paints before three.js finishes loading.
+const GameScene = lazy(() =>
+  import('./components/GameScene').then((m) => ({ default: m.GameScene })),
+)
+import { Hud } from './components/Hud'
+import { IntroOverlay, StoryPanel, CompletionScreen, ReadingMode } from './components/Panels'
+import { ErrorBoundary } from './components/ErrorBoundary'
+import { useGame } from './game/store'
+import { MISSIONS, buildAsteroids } from './game/data'
 
 export default function App() {
-  const targetRef = useRef(null)
-  const { scrollYProgress } = useScroll({ target: targetRef })
-  const [activeChapter, setActiveChapter] = useState(0)
-  const [ready, setReady] = useState(false)
-  const [contextLost, setContextLost] = useState(false)
-  const [showFps, setShowFps] = useState(false)
+  const flight = useMemo(() => createFlight(), [])
+  const rocks = useMemo(() => buildAsteroids(), [])
+  const phase = useGame((s) => s.phase)
+  const panel = useGame((s) => s.panel)
+  const drag = useRef({ active: false, lastX: 0 })
 
-  // Active chapter changes only on boundary crossings — never per frame.
-  useMotionValueEvent(scrollYProgress, 'change', (v) => {
-    const i = chapterIndexFor(v)
-    setActiveChapter((prev) => (prev === i ? prev : i))
-  })
+  // Remove the static boot loader once React has mounted.
+  useEffect(() => {
+    document.getElementById('boot-loader')?.remove()
+  }, [])
 
-  const reducedMotion = useMemo(
-    () =>
-      typeof window !== 'undefined' &&
-      window.matchMedia('(prefers-reduced-motion: reduce)').matches,
-    [],
-  )
-  const isMobile = useMemo(
-    () =>
-      typeof window !== 'undefined' &&
-      (window.innerWidth < 768 || window.matchMedia('(pointer: coarse)').matches),
-    [],
-  )
+  // Demo params for verification screenshots only (?demo=panel|done|joystick).
+  const demo = useMemo(() => new URLSearchParams(window.location.search).get('demo'), [])
+  useEffect(() => {
+    if (demo === 'panel') {
+      useGame.setState({ phase: 'playing', panel: { missionId: 'nv1' }, startTime: Date.now() })
+    } else if (demo === 'done') {
+      useGame.setState({
+        phase: 'done',
+        elapsedMs: 187000,
+        hits: 2,
+        completed: ['nv1', 'nv2', 'nv3', 'nv4'],
+        shards: ['shard-1', 'shard-2', 'shard-3'],
+      })
+    }
+  }, [demo])
+
+  const performScan = () => {
+    const s = useGame.getState()
+    const target = s.nearTarget
+    if (!target || s.panel || s.phase !== 'playing') return
+    if (target.id === 'moon') {
+      s.setMoonScanned()
+      s.showToast('Đã quét Mặt trăng. Giờ hãy bay tới Hành tinh và quét nó.')
+      return
+    }
+    const mission = MISSIONS[s.missionIndex]
+    if (mission) {
+      s.openPanel(mission.id)
+      s.completeMission(mission.id)
+    }
+  }
+
+  // Keyboard controls.
+  useEffect(() => {
+    const down = (e) => {
+      const st = useGame.getState()
+      if (e.code === 'KeyF') {
+        st.toggleFps()
+        return
+      }
+      if (st.panel) {
+        if (e.code === 'Enter' || e.code === 'Escape') st.closePanel()
+        return
+      }
+      if (st.phase !== 'playing') return
+      if (e.code === 'KeyE') {
+        performScan()
+        return
+      }
+      if (e.code.startsWith('Arrow')) e.preventDefault()
+      if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') flight.boost = true
+      flight.keys[e.code] = true
+    }
+    const up = (e) => {
+      if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') flight.boost = false
+      flight.keys[e.code] = false
+    }
+    window.addEventListener('keydown', down)
+    window.addEventListener('keyup', up)
+    return () => {
+      window.removeEventListener('keydown', down)
+      window.removeEventListener('keyup', up)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [flight])
 
   return (
-    <div className="app">
-      {/* Fixed 3D stage. No OrbitControls on purpose: one finger drag must
-          scroll the page on mobile, never rotate the camera. */}
-      <div className={`stage${ready ? ' ready' : ''}`}>
-        <ErrorBoundary fallbackText="Không mở được khung 3D trên thiết bị này. Thử trình duyệt có hỗ trợ WebGL.">
-          <NebulaScene
-            scrollYProgress={scrollYProgress}
-            reducedMotion={reducedMotion}
-            isMobile={isMobile}
-            showFps={showFps}
-            onCreated={() => setReady(true)}
-            onContextLost={setContextLost}
-          />
-        </ErrorBoundary>
-        {contextLost && (
-          <div className="stage-fallback">
-            <strong>WebGL bị gián đoạn.</strong>
-            <span>Trình duyệt đã thu hồi bối cảnh 3D (thường do hết bộ nhớ GPU).</span>
-            <button onClick={() => window.location.reload()}>Tải lại trang</button>
-          </div>
-        )}
-      </div>
-
-      {/* The 700vh scroll content that drives the whole story. */}
-      <div ref={targetRef} className="scroll-root">
-        <StoryOverlay
-          scrollYProgress={scrollYProgress}
-          activeChapter={activeChapter}
-          reducedMotion={reducedMotion}
-          showFps={showFps}
-          onToggleFps={() => setShowFps((v) => !v)}
-          onReplay={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
-          portfolioUrl={PORTFOLIO_URL}
-        />
-        <footer className="footer">
-          Nebula Scroll Story — câu chuyện hư cấu · React Three Fiber + GLSL ·
-          Cuộn để đi hết hành trình
-        </footer>
-      </div>
-
-      {showFps && (
-        <div className="fps-note">
-          FPS đo trực tiếp trên máy của bạn — không phải con số quảng cáo.
+    <ErrorBoundary>
+      <div
+        className="game-root"
+        onPointerDown={(e) => {
+          // Only the canvas starts a camera drag. Capturing the pointer on a
+          // button click would retarget the click to this root and break it.
+          if (e.target.tagName !== 'CANVAS') return
+          drag.current = { active: true, lastX: e.clientX }
+          e.currentTarget.setPointerCapture?.(e.pointerId)
+        }}
+        onPointerMove={(e) => {
+          if (!drag.current.active) return
+          const dx = e.clientX - drag.current.lastX
+          drag.current.lastX = e.clientX
+          flight.orbitYaw = (flight.orbitYaw || 0) + dx * 0.005
+        }}
+        onPointerUp={() => {
+          drag.current.active = false
+        }}
+        onPointerCancel={() => {
+          drag.current.active = false
+        }}
+      >
+        <div className="game-canvas">
+          <Canvas
+            dpr={[1, 1.75]}
+            gl={{ antialias: false, powerPreference: 'high-performance' }}
+            camera={{ fov: 55, near: 0.1, far: 900, position: [0, 6.5, 59] }}
+            onCreated={({ camera }) => {
+              camera.position.set(0, 6.5, 59)
+            }}
+          >
+            <Suspense fallback={null}>
+              <GameScene flight={flight} rocks={rocks} />
+            </Suspense>
+          </Canvas>
         </div>
-      )}
-    </div>
+
+        {phase === 'playing' && (
+          <Hud flight={flight} rocks={rocks} onScan={performScan} forceJoystick={demo === 'joystick'} />
+        )}
+        {phase === 'intro' && <IntroOverlay />}
+        {panel && phase === 'playing' && <StoryPanel />}
+        {phase === 'reading' && <ReadingMode />}
+        {phase === 'done' && <CompletionScreen />}
+      </div>
+    </ErrorBoundary>
   )
 }
